@@ -87,6 +87,8 @@ def _vehicle_update(message: str) -> dict[str, Any]:
         r"range\s*(?:of|is|=)?\s*(\d+(?:\.\d+)?)\s*km",
         r"(\d+(?:\.\d+)?)\s*km\s*(?:of\s+)?(?:range|driving range)",
         r"(\d+(?:\.\d+)?)\s*km\s+range",
+        # "vehicle's range 400" / "my range is 350": no unit means km. A 2-4 digit number that is not a percentage or a kWh figure.
+        r"\brange\s*(?:of|is|=|:)?\s*(\d{2,4}(?:\.\d+)?)\b(?!\s*(?:%|percent|kwh|kw\b|mi\b|miles?))",
     ])
     battery = _number(message, [
         r"(?:current|currently)\s+battery\s*(?:is|at|=)?\s*(\d+(?:\.\d+)?)\s*%",
@@ -95,6 +97,8 @@ def _vehicle_update(message: str) -> dict[str, Any]:
         r"(\d+(?:\.\d+)?)\s*%\s+(?:battery|charge|charged|soc)\b",
         r"(?:currently\s+|now\s+)?(?:at|having|with|on)\s*(\d+(?:\.\d+)?)\s*%\s*(?:charge|battery|charged)",
         r"(?:start(?:ing)?|leave|leaving)\s+(?:with|at)\s*(\d+(?:\.\d+)?)\s*%",
+        # "battery 80" / "current battery is 80": a percentage written without the sign (not a kWh or km figure)
+        r"\bbattery\s*(?:level\s*)?(?:is|at|=|:)?\s*(\d{1,3}(?:\.\d+)?)\b(?!\s*(?:kwh|kw\b|km|mi\b|miles?|\d))",
     ])
     capacity = _number(message, [
         r"battery\s*capacity\s*(?:of|is|=)?\s*(\d+(?:\.\d+)?)\s*kwh",
