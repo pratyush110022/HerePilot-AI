@@ -19,6 +19,10 @@ Find petrol pumps along my route
 Find hotels near my destination
 What is the distance to the second stop?
 How far is my destination?
+Plan a 2 day trip to Mysuru from Bangalore with my wife and baby   -> day-by-day plan, route, hotels, weather
+Suggest hill stations near Bangalore                               -> real places with drive time and weather
+Best restaurants in Mysuru for families                            -> ranked by Tripadvisor rating where HERE has it
+Plan an EV trip from Mumbai to Bhubaneswar                         -> then: range 400 km, battery 80%
 ```
 
 "Find restaurants near Hyderabad" is a **search**. "Add Hyderabad to my route" **edits the route**. The two are never
@@ -38,6 +42,14 @@ confused, and a search never changes the trip.
 - Optional EV Planner: vehicle range, battery level, reserve, charging target, charger search along the route and a
   deterministic charging plan. It reports "not calculated", "failed" or "no stop needed" honestly. Chargers come from
   the bundled Tata EV Charging Dataset (a static list, not live availability).
+- Travel planning, grounded in map data: itineraries (1-7 days, who is travelling, month, budget), destination ideas
+  ("hill stations near Bangalore") and hotel suggestions with booking-search links. The AI proposes and writes; HERE
+  verifies and supplies every place, hour, rating, route and drive time. A suggested place HERE cannot find is dropped.
+- Weather in results: current conditions and a 5-day outlook (Open-Meteo), plus a 12-month chart of measured typical
+  weather. If the AI's "best months" contradict the measured weather, a caveat is added. Hotel prices and availability
+  are not in HERE's data, so the app links to a search elsewhere and does not claim to book anything.
+- Ranking is honest: "best" orders by Tripadvisor rating only when enough places have ratings that mean something;
+  otherwise the list stays in distance order and says why.
 - AI is optional. Without it the assistant understands requests with built-in rules. With AWS Bedrock it also
   interprets free-form requests into structured intents and answers open-ended follow-ups about the results on
   screen. HERE stays authoritative: every place, distance and travel time in a reply comes from HERE results, and a
