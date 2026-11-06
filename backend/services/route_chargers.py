@@ -114,11 +114,19 @@ def calculate_distance_to_route_km(
 ):
     """
     Calculate the minimum approximate distance
-    between a charger and the OSRM route.
+    between a charger and the verified route.
     """
 
     if not route_coordinates:
         return None
+
+    # A long route is looked up through a grid. Only an answer that is certainly the nearest one is used (the nearest segment
+    # found is closer than a grid cell); anything else goes through the full scan below, so the result never changes.
+    if len(route_coordinates) > INDEX_MIN_POINTS:
+        index = _cached_index(route_coordinates)
+        found = index.nearest(latitude, longitude)
+        if found is not None and found[0] <= index.cell:
+            return round(found[0], 3)
 
     reference_latitude = (
         route_coordinates[0][1]
@@ -184,6 +192,12 @@ def calculate_route_position_percent(
 
     if len(route_coordinates) < 2:
         return None
+
+    if len(route_coordinates) > INDEX_MIN_POINTS:
+        index = _cached_index(route_coordinates)
+        found = index.nearest(latitude, longitude)
+        if found is not None and found[0] <= index.cell:
+            return index.position_percent(found[1], found[2])
 
     reference_latitude = (
         route_coordinates[0][1]
@@ -293,6 +307,95 @@ def calculate_route_position_percent(
     )
 
 
+INDEX_MIN_POINTS = 300      # shorter routes are scanned directly: it is fast and there is nothing to index
+_INDEX_CACHE_SIZE = 4
+_index_cache = []           # newest last: (the coordinate list itself, its RouteIndex)
+
+
+def _cached_index(route_coordinates):
+    """The index of this very coordinate list (kept by identity, so a new route never gets an old route's index)."""
+    for coords, index in _index_cache:
+        if coords is route_coordinates and index.size == len(route_coordinates):
+            return index
+    index = RouteIndex(route_coordinates, 5.0)
+    _index_cache.append((route_coordinates, index))
+    del _index_cache[:-_INDEX_CACHE_SIZE]
+    return index
+
+
+class RouteIndex:
+    """The route projected once, with its segments filed in a grid, for asking "how far is this point from the route?" many times.
+
+    ``calculate_distance_to_route_km`` re-projects and tests every segment of the route for every point it is asked about; on a
+    1,600 km route (tens of thousands of segments) with a couple of thousand candidate chargers that is minutes of work for the
+    server. Here a point only tests the segments in the grid cells around it. A segment within ``cell_km`` of a point always
+    passes through one of those cells, so for points inside the corridor the answer is exactly the one the full scan gives
+    (same projection, same formula, same tie-break), and points further away than a cell are reported as not found.
+    """
+
+    MAX_CELLS_PER_SEGMENT = 4096
+
+    def __init__(self, route_coordinates, cell_km):
+        self.size = len(route_coordinates)
+        self.reference_latitude = route_coordinates[0][1]
+        self.cell = max(float(cell_km), 0.5)
+        projected = [project_point(lat, lon, self.reference_latitude) for lon, lat in route_coordinates]
+        self.xs = [p[0] for p in projected]
+        self.ys = [p[1] for p in projected]
+        count = len(route_coordinates) - 1
+        # Same running sum, in the same order, as calculate_route_position_percent: the percentages match to the last digit.
+        self.prefix = [0.0] * (count + 1)
+        self.lengths = [0.0] * count
+        for i in range(count):
+            lon1, lat1 = route_coordinates[i]
+            lon2, lat2 = route_coordinates[i + 1]
+            self.lengths[i] = haversine_distance_km(lat1, lon1, lat2, lon2)
+            self.prefix[i + 1] = self.prefix[i] + self.lengths[i]
+        self.total = sum(self.lengths)
+        self.grid = {}
+        self.long_segments = []
+        cell = self.cell
+        for i in range(count):
+            x0, x1 = sorted((self.xs[i], self.xs[i + 1]))
+            y0, y1 = sorted((self.ys[i], self.ys[i + 1]))
+            cx0, cx1, cy0, cy1 = math.floor(x0 / cell), math.floor(x1 / cell), math.floor(y0 / cell), math.floor(y1 / cell)
+            if (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > self.MAX_CELLS_PER_SEGMENT:
+                self.long_segments.append(i)  # a huge straight segment is tested for every point instead of filed in thousands of cells
+                continue
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    self.grid.setdefault((cx, cy), []).append(i)
+
+    def nearest(self, latitude, longitude):
+        """(distance_km, segment index, position t along it) of the closest segment, or None when none is within a cell."""
+        px, py = project_point(latitude, longitude, self.reference_latitude)
+        cx, cy = math.floor(px / self.cell), math.floor(py / self.cell)
+        candidates = set(self.long_segments)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                candidates.update(self.grid.get((cx + dx, cy + dy), ()))
+        if not candidates:
+            return None
+        best = None
+        xs, ys = self.xs, self.ys
+        for i in sorted(candidates):  # index order, so a tie goes to the earlier segment as in the full scan
+            ax, ay, bx, by = xs[i], ys[i], xs[i + 1], ys[i + 1]
+            dx, dy = bx - ax, by - ay
+            if dx == 0 and dy == 0:
+                t = 0
+            else:
+                t = max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+            distance = math.sqrt((px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2)
+            if best is None or distance < best[0]:
+                best = (distance, i, t)
+        return best
+
+    def position_percent(self, segment, t):
+        if self.total <= 0:
+            return 0.0
+        return round((self.prefix[segment] + self.lengths[segment] * t) / self.total * 100, 2)
+
+
 def filter_chargers_near_route(
     route_geometry,
     stations,
@@ -300,7 +403,7 @@ def filter_chargers_near_route(
 ):
     """
     Return only charging stations within the
-    configured corridor of the actual OSRM route.
+    configured corridor of the actual verified route.
 
     corridor_km:
         Maximum distance from the route for a charger
@@ -319,6 +422,9 @@ def filter_chargers_near_route(
         )
 
     route_chargers = []
+
+    # One index of the route for all the stations (see RouteIndex). The corridor is the grid cell, so a station inside it is found exactly.
+    index = RouteIndex(route_coordinates, corridor_km)
 
     for station in stations:
 
@@ -343,27 +449,17 @@ def filter_chargers_near_route(
         ):
             continue
 
-        distance_from_route = (
-            calculate_distance_to_route_km(
-                route_coordinates,
-                latitude,
-                longitude,
-            )
-        )
+        found = index.nearest(latitude, longitude)
 
-        if (
-            distance_from_route is None
-            or distance_from_route > corridor_km
-        ):
+        if found is None:
             continue
 
-        route_position = (
-            calculate_route_position_percent(
-                route_coordinates,
-                latitude,
-                longitude,
-            )
-        )
+        distance_from_route = round(found[0], 3)
+
+        if distance_from_route > corridor_km:
+            continue
+
+        route_position = index.position_percent(found[1], found[2])
 
         charger = dict(station)
 

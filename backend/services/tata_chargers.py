@@ -1,5 +1,8 @@
 import csv
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -153,10 +156,7 @@ def load_tata_chargers():
 
     _TATA_CHARGERS = chargers
 
-    print(
-        f"Loaded {len(_TATA_CHARGERS)} "
-        f"Tata charging stations"
-    )
+    logger.info("event=charger_dataset_loaded stations=%d", len(_TATA_CHARGERS))
 
     return _TATA_CHARGERS
 
@@ -324,3 +324,23 @@ def get_tata_charger_stats():
         ),
         "operators": len(operators),
     }
+
+def search_tata_chargers_nearby(latitude: float, longitude: float, radius_km: float = 25.0, limit: int = 50):
+    """Return GeoPilot/Tata dataset chargers near an arbitrary location."""
+    from services.route_chargers import haversine_distance_km
+
+    results = []
+    for charger in load_tata_chargers():
+        distance = haversine_distance_km(
+            float(latitude),
+            float(longitude),
+            float(charger["latitude"]),
+            float(charger["longitude"]),
+        )
+        if distance <= radius_km:
+            item = dict(charger)
+            item["distance_from_reference_km"] = round(distance, 3)
+            item["source"] = "GeoPilot EV Charging Dataset"
+            results.append(item)
+    results.sort(key=lambda item: float(item.get("distance_from_reference_km", 999999)))
+    return results[:limit]

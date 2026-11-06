@@ -1,6 +1,10 @@
 fastapi==0.141.1
-groq==1.7.0
 httpx==0.28.1
+certifi==2026.10.23
 pydantic==2.13.5
 python-dotenv==1.2.3
 uvicorn==0.54.0
+flexpolyline==0.1.0
+boto3==1.43.120
+# Needed by botocore when AWS credentials come from an `aws login` (console) profile.
+awscrt==0.36.0

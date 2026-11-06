@@ -1,100 +1,102 @@
-# GeoPilot AI V2 — Architecture & Research Notes
+# HerePilot-AI architecture
 
 ## Design objective
 
-Turn GeoPilot from independent one-shot commands into a conversational geospatial system where every follow-up edits a single active Trip Context and then recalculates only the affected derived state.
+HerePilot-AI is a general-purpose conversational map assistant. Every message operates on one active **trip context**
+(stops, route, current search results, optional EV state). The optional EV Planner is an add-on to that context, not
+the product's purpose: an ordinary trip never computes or shows battery, charging-stop or EV feasibility information.
 
-## Research basis used for this implementation
-
-The implementation follows the documented usage patterns already present in the supplied project for FastAPI, MapLibre GL, OSRM, Nominatim and Overpass, and keeps the existing deterministic EV planner as the source of truth for battery/charger calculations.
-
-Live web verification was not available in this build session, so API/provider limits and current hosted-service policies were not independently rechecked against today's documentation. The code therefore uses configurable endpoints, conservative timeouts, public-service fallback/caching and explicit attribution.
-
-Reference documentation for later live verification:
-
-- OSRM API: https://project-osrm.org/docs/v5.24.0/api/
-- Nominatim API: https://nominatim.org/release-docs/latest/api/Search/
-- Overpass API language: https://wiki.openstreetmap.org/wiki/Overpass_API/Overpass_QL
-- MapLibre GL JS: https://maplibre.org/maplibre-gl-js/docs/
-- FastAPI: https://fastapi.tiangolo.com/
-- Model Context Protocol: https://modelcontextprotocol.io/
-
-## Conversation model
+## Request flow
 
 ```text
-user message
-   ↓
-Groq structured intent parser (optional)
-   ↓
-heuristic parser fallback
-   ↓
-AI Orchestrator
-   ↓
-Trip Context mutation
-   ↓
-verified tools
-   ├── Nominatim
-   ├── OSRM
-   ├── Tata CSV + route corridor filter
-   └── OSM/Overpass POI search
-   ↓
-verified result
-   ↓
-LLM explanation (optional)
-   ↓
-frontend map + conversation history
+Browser (React + HERE Maps JS)
+  │  POST /chat {message, session_id}
+  ▼
+FastAPI (main.py)  ── one exception handler, request IDs, CORS allow-list
+  ▼
+orchestrator.handle_message
+  1. interpret   rule parser (always)  +  LLM intent (optional, validated)  → one intent
+  2. handler     _h_* function for that intent: deterministic, provider-backed
+  3. reply       deterministic wording for every place, distance, time and count; the LLM only answers open-ended
+                 follow-ups about results on screen, and a number it states must appear in those results
+  ▼
+{session_id, reply, result, context}   (context = the full session snapshot used to draw the map)
 ```
 
-## Trip Context
+### Interpretation
 
-The context owns:
+- `services/intent_parser.py` is the rule parser. Its priority order matters: route edits ("add a stop at Hyderabad")
+  are matched before place searches ("restaurants at Hyderabad"), and searches before distance questions.
+- `services/intents.py` defines the closed set of intents and `validate_intent`, which clamps radii and limits,
+  normalises place text and rejects anything outside the schema. Both the rule parser and the LLM go through it.
+- `services/llm_assistant.py` asks the model for a structured intent and, separately, to phrase an answer. It only sees
+  allow-listed views of the context (`llm_view`, `result_view`), never raw provider payloads.
+- Where rules are exact (route edits, numbered EV details, vehicle numbers) they win over the model. EV intents from
+  the model are ignored unless the EV Planner is on.
+- `services/references.py` resolves "the second stop", "my destination", "that station" and "charging stop 4" against
+  what actually exists in the session. An unresolved reference produces a targeted question, never a guess.
 
-- ordered stops (origin, waypoints, destination)
-- user-declared vehicle information
-- current battery percentage
-- battery capacity, when supplied
-- estimated vehicle range, when supplied
-- reserve percentage
-- target charge percentage
-- route geometry and route legs
-- route-aware Tata charging candidates
-- current OSM POI result set
-- deterministic EV plan
+### Handlers and results
 
-This means follow-ups such as `Add Coorg`, `Remove Mysuru`, `What if I start with 60%`, `Change reserve to 20%`, and `Find a hotel near my first charging stop` can act on existing state.
+Handlers live in `services/orchestrator.py` (`_HANDLERS`). They return a result dict with an `action` name. Route
+changes go through `_apply_route`, which recalculates the route and calls `TripContext.invalidate_route_dependents()`
+so nothing computed from the old route survives. EV recalculation (`_recompute_ev`) does not re-route and does not
+clear search results.
 
-## Tool boundary
+A failed turn leaves the saved session untouched (`/chat` works on a deep copy).
 
-The backend keeps capabilities separated:
+## LLM provider
 
-- OSRM: road routing only.
-- Nominatim: place geocoding only.
-- Overpass/OSM: dynamic POI discovery only.
-- Tata CSV: charger repository for the portfolio dataset.
-- EV planner: deterministic battery/charging calculations.
-- Orchestrator: conversation/state management only.
+`services/llm/` defines a small `LLMProvider` protocol, a `NullProvider` (rules mode) and `BedrockProvider`, which uses
+the Bedrock Converse API through boto3. There is no default model: the operator sets `BEDROCK_MODEL_ID`, and the
+standard AWS credential chain supplies identity (`AWS_PROFILE`, SSO/login session or IAM role). Failures are mapped to
+a closed set of `LLMError` categories; AWS messages are never copied into logs or responses.
 
-`mcp_tools.py` is an MCP-ready internal tool registry. `/mcp/tools` publishes the available capabilities and input schemas. A full external MCP transport can be added without changing the tool implementations.
+## Providers
 
-## POI strategy
+| Capability | Provider | Notes |
+| --- | --- | --- |
+| Geocoding | HERE Geocoding & Search | City-like queries prefer localities; equal names in different states raise `place_ambiguous` with options. |
+| Places | HERE Discover | `in=circle:lat,lon;r=meters` plus an exact distance check. OpenStreetMap / Overpass is a labelled fallback. |
+| Routing | HERE Routing v8 | Multi-stop, `car`, `pedestrian` or `bicycle`. Flexible polylines are decoded server-side and also sent to the browser. |
+| Route-corridor search | HERE Discover | Samples up to 20 points along the route and reports `coverage.complete`. |
+| Weather | Open-Meteo | Advisory only. Never changes a calculation. |
+| EV chargers | Bundled Tata EV dataset, HERE EV Charging Search | The dataset drives the deterministic EV plan. |
 
-For route POIs, GeoPilot builds a route bounding box, requests one category from Overpass, then performs precise route-corridor filtering using the route geometry.
+HERE native EV routing is off by default (`HERE_EV_ENABLED=false`): it needs a vehicle consumption model this app does
+not have, so EV results come from the deterministic planner.
 
-For POIs near stops or charging stops, GeoPilot sends one multi-point Overpass query rather than one HTTP request per stop. Results are deduplicated, cached for five minutes in-process, and retried against a fallback Overpass endpoint after rate limiting or endpoint failure.
+## Errors and safety
 
-## EV strategy
+- `services/errors.py` defines `AppError` with a stable `code`, a fixed client message and a `retryable` flag. Internal
+  detail goes only to the redacting log formatter.
+- `services/http_utils.py` builds the TLS context from certifi plus an optional extra CA (`GEO_HTTP_CA_BUNDLE`). There
+  is no fallback that disables verification.
+- Logs go through `services/logging_setup.py`, which redacts keys, tokens and URLs with query strings.
+- Session IDs must be UUIDs; unknown IDs never create entries; the in-memory store is bounded (LRU, 500).
 
-The EV planner receives the actual OSRM route distance plus route-positioned charger candidates. User-declared range is used directly and is never presented as an official vehicle specification. Reserve and charge target remain explicit user controls.
+## Frontend
 
-## Storage strategy
+```text
+src/App.tsx                 layout, tabs (Chat, Trip, EV Planner), focus/prefill state
+src/useConversation.ts      messages, session, health polling, retry, panel actions, localStorage persistence
+src/api.ts                  fetch wrapper; every failure becomes an ApiError with a safe message
+src/cards.ts                turns a /chat result into compact result cards (places, route, distance, EV)
+src/MapView.tsx             draws route, stops, results and (EV only) charging stations
+src/mapMarkers.ts          marker and popup DOM built with textContent, never provider HTML
+src/hereMapAdapter.ts       thin wrapper over the HERE Maps JS SDK
+src/components/*            Messages, Cards, Composer, TripPanel, EvPlannerPanel, Welcome, Brand
+```
 
-The current release intentionally keeps Trip Context in memory and charger data in the included CSV. The existing PostGIS foundation remains separate so the next release can move charger/recent-session storage to PostgreSQL/Redis without redesigning the UI conversation model.
+EV content (the EV card, charger markers, battery figures) is rendered only when `context.ev_mode` is true.
 
-## Production hardening next
+## State
 
-- Persist Trip Context in PostgreSQL/Redis.
-- Put Nominatim/Overpass behind a controlled proxy or hosted provider with usage limits.
-- Add rate limiting and auth around the API.
-- Replace public CSV scans with PostGIS indexed spatial queries.
-- Add a standards-compliant MCP transport if an external MCP client needs to connect directly.
-- Add observed charger availability/connector status only when a trustworthy live provider is integrated.
+The trip context is an in-memory, thread-safe store, so it suits a single-instance deployment. A persistent store
+(for example Redis) would be needed for multiple instances. The charging CSV is bundled with the project.
+
+## Legacy modules
+
+Older modules (`groq_llm*.py`, OSRM/Nominatim helpers, `*_backup.py`, `main_before_async_chat_fix.py`) remain in the
+repository for reference. None are imported by the active code path. `services/groq_llm.py` is marked historical and
+the `groq` package is no longer a dependency.

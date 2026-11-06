@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import time
@@ -11,6 +12,7 @@ from typing import Any
 import httpx
 
 from services.http_utils import request
+from services.logging_setup import describe_exception, url_host
 
 from services.route_chargers import (
     calculate_distance_to_route_km,
@@ -18,12 +20,14 @@ from services.route_chargers import (
 )
 
 
+logger = logging.getLogger(__name__)
+
 OVERPASS_URLS = [
     os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
     "https://overpass.kumi.systems/api/interpreter",
 ]
 HEADERS = {
-    "User-Agent": "GeoPilot-AI/2.0 (OSM POI exploration)",
+    "User-Agent": "HerePilot-AI/5.0 (OSM POI exploration)",
     "Accept": "application/json",
 }
 
@@ -36,11 +40,23 @@ CATEGORY_DEFINITIONS: dict[str, list[tuple[str, str]]] = {
     "fuel": [("amenity", "fuel")],
     "supermarket": [("shop", "supermarket")],
     "convenience": [("shop", "convenience")],
-    "tourist_attraction": [("tourism", "attraction"), ("tourism", "museum"), ("tourism", "viewpoint"), ("historic", "monument")],
+    "tourist_attraction": [
+        ("tourism", "attraction"), ("tourism", "museum"),
+        ("tourism", "viewpoint"), ("tourism", "artwork"),
+        ("tourism", "gallery"), ("tourism", "theme_park"),
+        ("tourism", "zoo"), ("historic", "monument"),
+        ("historic", "castle"), ("historic", "ruins"),
+        ("historic", "archaeological_site"), ("natural", "beach"),
+    ],
     "parking": [("amenity", "parking")],
     "ev_charging": [("amenity", "charging_station")],
     "bank": [("amenity", "bank")],
     "atm": [("amenity", "atm")],
+    "pub_bar": [("amenity", "pub"), ("amenity", "bar")],
+    "nightlife": [("amenity", "nightclub"), ("amenity", "music_venue"), ("amenity", "pub"), ("amenity", "bar")],
+    "shopping_mall": [("shop", "mall")],
+    "car_repair": [("shop", "car_repair"), ("craft", "car_repair")],
+    "car_wash": [("amenity", "car_wash")],
     "toilet": [("amenity", "toilets")],
 }
 
@@ -65,6 +81,12 @@ ALIAS_TO_CATEGORY = {
     "tourism": "tourist_attraction",
     "charging": "ev_charging",
     "chargers": "ev_charging",
+    "pubs": "pub_bar",
+    "bars": "pub_bar",
+    "nightclubs": "nightlife",
+    "malls": "shopping_mall",
+    "car repair": "car_repair",
+    "car wash": "car_wash",
 }
 
 _CACHE: dict[str, tuple[float, Any]] = {}
@@ -138,21 +160,31 @@ async def query_overpass(query: str) -> dict[str, Any]:
                         data={"data": query},
                     )
                     if response.status_code == 429:
+                        logger.warning(
+                            "event=overpass_rate_limited endpoint_host=%s attempt=%d", url_host(endpoint), attempt + 1
+                        )
                         await asyncio.sleep(2.0 * (attempt + 1))
                         last_error = RuntimeError("Overpass rate limited request (429).")
                         continue
                     if response.status_code != 200:
-                        raise RuntimeError(
-                            f"Overpass returned {response.status_code}: {response.text[:500]}"
+                        logger.warning(
+                            "event=overpass_http_error endpoint_host=%s http_status=%s attempt=%d",
+                            url_host(endpoint), response.status_code, attempt + 1,
                         )
+                        # The body can echo the query; keep only the status code.
+                        raise RuntimeError(f"Overpass returned HTTP {response.status_code}")
                     data = response.json()
                     _CACHE[key] = (time.monotonic(), data)
                     return data
                 except Exception as exc:
                     last_error = exc
+                    logger.warning(
+                        "event=overpass_attempt_failed endpoint_host=%s attempt=%d error=%s",
+                        url_host(endpoint), attempt + 1, describe_exception(exc),
+                    )
                     await asyncio.sleep(0.6 * (attempt + 1))
 
-    raise RuntimeError(f"All Overpass endpoints failed: {last_error}")
+    raise RuntimeError(f"All Overpass endpoints failed ({type(last_error).__name__ if last_error else 'unknown'})")
 
 
 def parse_pois(data: dict[str, Any], category: str | None = None) -> list[dict[str, Any]]:

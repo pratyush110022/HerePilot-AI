@@ -1,0 +1,43 @@
+[Unit]
+Description=HerePilot-AI backend (FastAPI on uvicorn, one worker)
+After=network-online.target herepilot-secrets.service
+Wants=network-online.target
+Requires=herepilot-secrets.service
+
+[Service]
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/srv/herepilot-ai/backend
+# /var/lib/herepilot, owned by the service user: holds the Bedrock usage counter so a restart cannot reset the daily cap.
+StateDirectory=herepilot
+
+# Not secret. CORS_ALLOW_ORIGINS and the BEDROCK_*_CALL_LIMIT / BEDROCK_USAGE_STATE_FILE settings live in
+# /etc/herepilot/backend.conf (see below), so they can be changed without editing this unit.
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LLM_PROVIDER=bedrock
+Environment=BEDROCK_MODEL_ID=amazon.nova-pro-v1:0
+Environment=BEDROCK_REGION=eu-west-2
+Environment=BEDROCK_TIMEOUT_SECONDS=30
+Environment=AWS_DEFAULT_REGION=eu-west-2
+Environment=LOG_LEVEL=INFO
+Environment=HERE_EV_ENABLED=false
+EnvironmentFile=/etc/herepilot/backend.conf
+# Secrets (HERE_API_KEY). Lives on tmpfs, filled by herepilot-secrets.service.
+EnvironmentFile=/run/herepilot/backend.env
+
+# One worker, always: chat sessions are held in this process's memory.
+# --no-access-log: uvicorn would log query strings, which contain what people type.
+ExecStart=/srv/herepilot-ai/backend/.venv/bin/python -m uvicorn main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --no-access-log \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

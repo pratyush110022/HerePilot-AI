@@ -1,0 +1,8 @@
+# Development and test dependencies. Runtime pins live in requirements.txt.
+#
+# Safe offline test run (from backend/), with provider credentials blanked so
+# no test can reach HERE or AWS even if backend/.env exists:
+#   env HERE_API_KEY= LLM_PROVIDER=none python -m pytest
+-r requirements.txt
+pytest==9.2.0
+pytest-asyncio==1.4.1
