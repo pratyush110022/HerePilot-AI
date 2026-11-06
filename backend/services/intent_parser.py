@@ -223,6 +223,8 @@ def reference_in(text: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------------------------
 _PLACE_TAIL = re.compile(
     r"(?:\s+(?:with|using|driving|while|if|so that|because)\b.*|\s+(?:in|by|on|for)\s+(?:my|a|an|the|our)\b.*|[.!?;]\s.*|\s+(?:and|then)\s+(?:find|show|share|list|get|also|recommend|suggest|give|tell)\b.*|\s+please$|"
+    # a mode or a question word after the place: "Delhi to Agra by road", "Mumbai to Goa distance"
+    r"\s+by\s+(?:road|car|bike|train|bus|flight|air|ev)$|\s+(?:distance|duration|travel\s+time|time|route|directions?|today|tomorrow|now)$|"
     # a second clause after the place: "to Goa, my car has 350 km range" / "to Goa and my battery is at 80%"
     r",\s*(?:my|our|i|i'm|we|vehicle|range|battery|currently|starting|using|with|and|then|also)\b.*|\s+(?:and\s+)?(?:my|our)\s+(?:car|vehicle|ev|battery|range)\b.*)",
     re.IGNORECASE,
@@ -244,6 +246,14 @@ def extract_places(text: str) -> list[str]:
         # between "trip" and "to"), nor "the journey time to Delhi" or "a trip with my wife to Goa".
         r"\b(?:trip|journey|drive|route|ride|tour)\s+(?!(?:to|from|with|for|in|at|on|by|via|near|around|and|of|plan|planner|time|times|"
         r"duration|distance|length|cost|details|options|back|home)\b)(?P<a>[a-z][a-z .'-]{1,40}?)\s+to\s+(?P<b>.+)$",
+        # The way most people type a route: "Mumbai to Goa", "Mumbai to Goa via Pune". The whole message is "A to B", so it must not start
+        # like a question or an instruction ("how to get to...", "add Hyderabad to my route"), and B must be a place, not "my route".
+        r"^(?!(?:how|what|where|when|why|who|which|is|are|can|could|do|does|did|tell|show|find|list|give|get|go|going|want|need|i|we|please|best|way|ways|"
+        r"time|add|remove|delete|insert|put|move|change|replace|skip|include|stop|take|bring|send|navigate|drive|walk|ride|travel|trip|journey|route|"
+        r"direction|directions|plan|from|between|visit|near|nearest|restaurants?|hotels?|cafes?|hospitals?|petrol|fuel|charging|ev|"
+        r"places?|things|activities|attractions?|spots?|ideas?|options?|something|anything|reasons?|tips?|welcome|thanks?|back|close|next|due|according|new|up)\b)"
+        r"(?P<a>[a-z][a-z .'-]{1,40}?)\s+to\s+(?!(?:my|the|this|that|our|these|those|it|here|there|me|us|be|do|see|find|get|go|visit|eat|try|stay|explore|know|buy|reach|"
+        r"learn|check|book|take|drive|travel|walk|use|avoid|pack|carry|wear|bring|plan|start|begin|make|have|keep|add|remove|reduce|save)\b)(?P<b>[a-z].+)$",
     ]
     for pattern in patterns:
         match = re.search(pattern, text.strip(), flags=re.IGNORECASE)
@@ -251,13 +261,19 @@ def extract_places(text: str) -> list[str]:
             continue
         first = _trim_place(match.group("a"))
         rest = match.group("b").strip()
+        # "Bangalore to Mysuru then Ooty": a second leg after the first destination.
+        sequel = re.split(r"\s+(?:and\s+)?then\s+(?:to\s+)?", rest, maxsplit=1, flags=re.IGNORECASE)
+        after = _trim_place(sequel[1]) if len(sequel) == 2 else ""
+        if re.match(r"(?:find|show|share|list|get|also|recommend|suggest|give|tell|add|search|look|check|what|how|where|please|plan|book|stop|charge|eat|visit|see)\b", after, re.IGNORECASE):
+            after = ""  # "then find restaurants" is another request, not another place
+        rest = sequel[0].strip()
         pieces = re.split(r"\s+(?:via|through|with stop at|stopping at|passing through)\s+", rest, maxsplit=1, flags=re.IGNORECASE)
         destination = _trim_place(pieces[0])
         middle: list[str] = []
         if len(pieces) == 2:
             tail = _PLACE_TAIL.sub("", pieces[1].strip())
             middle = [_trim_place(p) for p in re.split(r"\s*,\s*|\s+and\s+", tail) if _trim_place(p)]
-        places = [first] + middle + [destination]
+        places = [first] + middle + [destination] + ([after] if after else [])
         if all(places) and len(places) >= 2 and first.lower() != destination.lower():
             return places
     arrow = re.split(r"\s*(?:->|→)\s*", text)
